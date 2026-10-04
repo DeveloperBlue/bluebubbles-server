@@ -10,7 +10,8 @@
     "description": "BlueBubbles Server is the app that powers the BlueBubbles app ecosystem",
     "scripts": {
         "build": "export NODE_ENV=production && webpack --config ./scripts/webpack.main.prod.config.js",
-        "start": "export NODE_ENV=development && webpack --config ./scripts/webpack.main.config.js && electron ./dist/main.js",
+        "start": "export NODE_ENV=development && export BB_HELPER_DYLIB=\"${BB_HELPER_DYLIB:-$HOME/Projects/bluebubbles-helper/build/Build/Products/Release/BlueBubblesHelper.dylib}\" && webpack --config ./scripts/webpack.main.config.js && electron ./dist/main.js",
+        "start:stock": "export NODE_ENV=development && unset BB_HELPER_DYLIB && webpack --config ./scripts/webpack.main.config.js && electron ./dist/main.js",
         "lint": "eslint --ext=jsx,js,tsx,ts src",
         "dist": "npm run build && electron-builder build --mac --publish never --config ./scripts/electron-builder-config.js",
         "release": "npm run build && electron-builder build --mac --publish always --config ./scripts/electron-builder-config.js",
