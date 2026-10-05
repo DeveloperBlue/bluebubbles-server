@@ -14,6 +14,7 @@
         "start:stock": "export NODE_ENV=development && unset BB_HELPER_DYLIB && webpack --config ./scripts/webpack.main.config.js && electron ./dist/main.js",
         "lint": "eslint --ext=jsx,js,tsx,ts src",
         "dist": "npm run build && electron-builder build --mac --publish never --config ./scripts/electron-builder-config.js",
+        "dist:canary": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder build --mac --publish never --config ./scripts/electron-builder-config.canary.js",
         "release": "npm run build && electron-builder build --mac --publish always --config ./scripts/electron-builder-config.js",
         "rebuild": "electron-rebuild -f better-sqlite3 node-mac-contacts node-mac-permissions",
         "postinstall": "electron-rebuild install-app-deps && npm run rebuild"
