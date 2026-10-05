@@ -7,6 +7,7 @@ import fs from "fs";
 import yaml from "js-yaml";
 import { FileSystem } from "@server/fileSystem";
 import { ParseArguments } from "@server/helpers/argParser";
+import { patchUserDataPath } from "@server/helpers/canary";
 
 import { Server } from "@server";
 import { isEmpty, safeTrim } from "@server/helpers/utils";
@@ -16,8 +17,8 @@ import { getLogger } from "@server/lib/logging/Loggable";
 
 app.commandLine.appendSwitch("in-process-gpu");
 
-// Patch in original user data directory
-app.setPath("userData", app.getPath("userData").replace("@bluebubbles/server", "bluebubbles-server"));
+// Patch in original user data directory (canary shares prod's folder)
+patchUserDataPath();
 
 // Load the config file
 let cfg = {};

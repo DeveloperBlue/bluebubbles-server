@@ -4,6 +4,7 @@ import { Server } from "@server";
 import { SERVER_UPDATE } from "@server/events";
 import { ScheduledService } from "@server/lib/ScheduledService";
 import { Loggable } from "@server/lib/logging/Loggable";
+import { getDisplayVersion, isCanaryBuild, isNewerCanary } from "@server/helpers/canary";
 import axios, { AxiosResponse } from "axios";
 
 export class UpdateService extends Loggable {
@@ -29,8 +30,8 @@ export class UpdateService extends Loggable {
         this.isOpen = false;
         this.window = window;
 
-        // Correct current version if needed
-        if (this.currentVersion.split(".").length > 3) {
+        // Correct current version if needed (non-canary only; canary needs the -canary.N suffix)
+        if (!isCanaryBuild() && this.currentVersion.split(".").length > 3) {
             this.currentVersion = semver.coerce(this.currentVersion).format();
         }
     }
@@ -52,37 +53,48 @@ export class UpdateService extends Loggable {
     }
 
     async checkForUpdate({ showNoUpdateDialog = false, showUpdateDialog = true } = {}): Promise<boolean> {
+        const canary = isCanaryBuild();
+        const repo = canary ? "DeveloperBlue/bluebubbles-server" : "BlueBubblesApp/bluebubbles-server";
         let releasesRes: AxiosResponse<any, any>;
 
         try {
-            releasesRes = await axios.get(
-                "https://api.github.com/repos/BlueBubblesApp/bluebubbles-server/releases",
-                {
-                    headers: {
-                        Accept: "application/vnd.github.v3+json"
-                    }
+            releasesRes = await axios.get(`https://api.github.com/repos/${repo}/releases`, {
+                headers: {
+                    Accept: "application/vnd.github.v3+json"
                 }
-            );
+            });
         } catch (ex: any) {
             this.log.error(`Failed to fetch release information from GitHub! Error: ${ex?.message ?? String(ex)}`);
             return false;
         }
 
-        const releases = (releasesRes.data as any[]).filter((x) =>
-            !x.prerelease &&
-            !x.draft &&
-            x.tag_name.match(/v\d+\.\d+\.\d+/) &&
-            x.assets.some((y: any) => y.name.startsWith('BlueBubbles-') && y.name.endsWith('.dmg'))
-        );
+        const releases = (releasesRes.data as any[]).filter(x => {
+            if (x.draft) return false;
+            const hasDmg = x.assets.some(
+                (y: any) =>
+                    y.name.endsWith(".dmg") &&
+                    (canary
+                        ? y.name.startsWith("bluebubbles-") && y.name.includes("-canary.")
+                        : y.name.startsWith("BlueBubbles-"))
+            );
+            if (!hasDmg) return false;
+            if (canary) {
+                return x.prerelease && /v\d+\.\d+\.\d+-canary\.\d+/i.test(x.tag_name);
+            }
+            return !x.prerelease && x.tag_name.match(/v\d+\.\d+\.\d+/);
+        });
         if (!releases || releases.length === 0) return false;
-    
+
         // Get the version of the latest release
         const latest = releases[0];
-        const latestVersion = latest.tag_name.replace("v", "");
-        const semverVersion = semver.coerce(latestVersion).format();
+        const latestVersion = latest.tag_name.replace(/^v/i, "");
 
-        // Compare the latest version to the current version
-        this.hasUpdate = semver.lt(this.currentVersion, semverVersion);
+        if (canary) {
+            this.hasUpdate = isNewerCanary(this.currentVersion, latestVersion);
+        } else {
+            const semverVersion = semver.coerce(latestVersion).format();
+            this.hasUpdate = semver.lt(this.currentVersion, semverVersion);
+        }
         this.updateInfo = latest;
 
         if (this.hasUpdate) {
@@ -92,8 +104,10 @@ export class UpdateService extends Loggable {
 
             if (showUpdateDialog) {
                 const notification = {
-                    title: "BlueBubbles Update Available!",
-                    body: `BlueBubbles macOS Server v${latestVersion} is now available to be installed!`
+                    title: canary ? "BlueBubbles Canary Update Available!" : "BlueBubbles Update Available!",
+                    body: canary
+                        ? `BlueBubbles Canary ${latestVersion} is now available to be installed!`
+                        : `BlueBubbles macOS Server v${latestVersion} is now available to be installed!`
                 };
                 new Notification(notification).show();
             }
@@ -102,9 +116,11 @@ export class UpdateService extends Loggable {
         if (!this.hasUpdate && showNoUpdateDialog) {
             const dialogOpts: MessageBoxOptions = {
                 type: "info",
-                title: "BlueBubbles Update",
+                title: canary ? "BlueBubbles Canary Update" : "BlueBubbles Update",
                 message: "You have the latest version installed!",
-                detail: `You are running the latest version of BlueBubbles! v${this.currentVersion}`
+                detail: canary
+                    ? `You are running the latest BlueBubbles Canary! ${getDisplayVersion()}`
+                    : `You are running the latest version of BlueBubbles! v${this.currentVersion}`
             };
 
             dialog.showMessageBox(this.window, dialogOpts);

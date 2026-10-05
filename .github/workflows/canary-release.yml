@@ -1,0 +1,350 @@
+name: Canary Distribution
+
+# Manual-only canary builds for personal distribution. Does not run on push.
+# Builds unsigned macOS DMGs (x64 + arm64). No Apple Developer ID on this fork.
+#
+# Versioning: package.json stays at BlueBubbles' value (e.g. 1.9.9). CI bumps it
+# for the build to 1.9.9-canary.N so the app shows Canary branding / 1.9.9+N.
+# Tag is v1.9.9-canary.N (created with GITHUB_TOKEN).
+#
+# Extra release description: edit .github/canary-release-notes.md on developerblue/canary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary:
+        description: "Canary number n. Display version becomes base+n (e.g. 1.9.9+3)."
+        required: true
+        type: string
+      at-commit:
+        description: "Optional SHA on developerblue/canary. Empty = branch tip."
+        required: false
+        type: string
+      create_release:
+        description: "Create a GitHub prerelease (tag vBASE-canary.n) and attach the DMGs"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CANARY_REF: developerblue/canary
+  UPSTREAM_REPO: BlueBubblesApp/bluebubbles-server
+  CANARY_BRANCH_PREFIX: developerblue/
+  CANARY_GITHUB_USER: DeveloperBlue
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.resolve.outputs.base }}
+      canary: ${{ steps.resolve.outputs.canary }}
+      display: ${{ steps.resolve.outputs.display }}
+      electron_version: ${{ steps.resolve.outputs.electron_version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      asset_prefix: ${{ steps.resolve.outputs.asset_prefix }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANARY_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve versions
+        id: resolve
+        env:
+          CANARY: ${{ inputs.canary }}
+          AT_COMMIT: ${{ inputs.at-commit }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CANARY" =~ ^[1-9][0-9]{0,2}$ ]]; then
+            echo "::error::canary must be an integer from 1 to 999 (got '$CANARY')"
+            exit 1
+          fi
+
+          source_ref=$(git rev-parse HEAD)
+          at="${AT_COMMIT//[[:space:]]/}"
+          if [[ -n "$at" ]]; then
+            if ! [[ "$at" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "::error::at-commit must be a git SHA (got '$AT_COMMIT')"
+              exit 1
+            fi
+            if ! git cat-file -e "${at}^{commit}" 2>/dev/null; then
+              echo "::error::at-commit '$at' is not a commit in this repository"
+              exit 1
+            fi
+            resolved=$(git rev-parse --verify "${at}^{commit}")
+            if ! git merge-base --is-ancestor "$resolved" HEAD; then
+              echo "::error::at-commit $resolved is not on ${CANARY_REF}"
+              exit 1
+            fi
+            git checkout --detach "$resolved"
+            source_ref=$resolved
+          fi
+
+          base=$(node -p "require('./package.json').version")
+          if ! [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::could not parse package.json version '$base' (expected X.Y.Z)"
+            exit 1
+          fi
+
+          electron_version="${base}-canary.${CANARY}"
+          display="${base}+${CANARY}"
+          {
+            echo "base=$base"
+            echo "canary=$CANARY"
+            echo "display=$display"
+            echo "electron_version=$electron_version"
+            echo "tag=v${electron_version}"
+            echo "asset_prefix=bluebubbles-${base}-canary.${CANARY}"
+            echo "source_ref=$source_ref"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Canary version"
+            echo ""
+            echo "- Base: \`$base\`"
+            echo "- Display: \`$display\`"
+            echo "- Electron package version: \`$electron_version\`"
+            echo "- Tag: \`v${electron_version}\`"
+            echo "- Source: \`$source_ref\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: version
+    runs-on: macos-13
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Setup Node.js 20.11
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.11"
+
+      - name: Install Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Bump package versions for canary build
+        env:
+          ELECTRON_VERSION: ${{ needs.version.outputs.electron_version }}
+        run: |
+          set -euo pipefail
+          for f in package.json packages/server/package.json packages/ui/package.json; do
+            node -e "
+              const fs = require('fs');
+              const p = JSON.parse(fs.readFileSync('$f', 'utf8'));
+              p.version = process.env.ELECTRON_VERSION;
+              fs.writeFileSync('$f', JSON.stringify(p, null, 4) + '\n');
+            "
+            echo "set $f version=$ELECTRON_VERSION"
+          done
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Build canary DMGs (unsigned)
+        env:
+          CANARY_BASE: ${{ needs.version.outputs.base }}
+          CANARY_N: ${{ needs.version.outputs.canary }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run build:canary
+
+      - name: Collect artifacts
+        env:
+          ASSET_PREFIX: ${{ needs.version.outputs.asset_prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          mapfile -t found < <(find packages/server/releases -type f -name '*.dmg' | sort)
+          if [[ ${#found[@]} -eq 0 ]]; then
+            echo "::error::No DMGs under packages/server/releases"
+            find packages/server/releases -type f || true
+            exit 1
+          fi
+          for f in "${found[@]}"; do
+            base=$(basename "$f")
+            # bluebubbles-1.9.9-canary.1-x64.dmg → bluebubbles-1.9.9-canary.1.dmg
+            out="$base"
+            if [[ "$base" == *-x64.dmg ]]; then
+              out="${base%-x64.dmg}.dmg"
+            fi
+            cp "$f" "out/$out"
+            echo "collected $out"
+          done
+          ls -la out/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.version.outputs.asset_prefix }}-macos
+          path: out/*.dmg
+
+  release:
+    if: ${{ inputs.create_release }}
+    needs: [version, build]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build release notes
+        env:
+          BASE: ${{ needs.version.outputs.base }}
+          DISPLAY: ${{ needs.version.outputs.display }}
+          CANARY: ${{ needs.version.outputs.canary }}
+          ASSET_PREFIX: ${{ needs.version.outputs.asset_prefix }}
+          SOURCE_REF: ${{ needs.version.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "https://github.com/${UPSTREAM_REPO}.git" \
+            master:refs/remotes/upstream/master
+          git fetch --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+            '+refs/heads/developerblue/*:refs/remotes/origin/developerblue/*'
+
+          prefix_lc="${CANARY_BRANCH_PREFIX,,}"
+          user_lc="${CANARY_GITHUB_USER,,}"
+
+          lookup_pr() {
+            local name="$1"
+            local json
+            json=$(curl -fsS \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --get "https://api.github.com/repos/${UPSTREAM_REPO}/pulls" \
+              --data-urlencode "state=all" \
+              --data-urlencode "head=${CANARY_GITHUB_USER}:${name}" \
+              --data-urlencode "per_page=20") || json='[]'
+            jq -r '(map(select(.state=="open")) + map(select(.merged_at != null))) | .[0].number // empty' <<<"$json"
+          }
+
+          branch_line() {
+            local name="$1"
+            local num
+            num=$(lookup_pr "$name")
+            if [[ -n "$num" ]]; then
+              echo "- \`${name}\` ([#${num}](https://github.com/${UPSTREAM_REPO}/pull/${num}))"
+            else
+              echo "- \`${name}\`"
+            fi
+          }
+
+          declare -A seen=()
+          listed=0
+          {
+            echo "## Merged since upstream master"
+            echo ""
+            while IFS=$'\t' read -r merge_sha subject; do
+              [ -z "${subject:-}" ] && continue
+              branch=""
+              pr_owner=""
+              if [[ "$subject" =~ ^Merge\ branch\ \'([^\']+)\' ]]; then
+                branch="${BASH_REMATCH[1]}"
+              elif [[ "$subject" =~ ^Merge\ branch\ \"([^\"]+)\" ]]; then
+                branch="${BASH_REMATCH[1]}"
+              elif [[ "$subject" =~ ^Merge\ remote-tracking\ branch\ \'([^\']+)\' ]]; then
+                branch="${BASH_REMATCH[1]}"
+              elif [[ "$subject" =~ ^Merge\ pull\ request\ #[0-9]+\ from\ ([^[:space:]]+) ]]; then
+                pr="${BASH_REMATCH[1]}"
+                pr_owner="${pr%%/*}"
+                branch="${pr#*/}"
+              else
+                continue
+              fi
+              branch="${branch#refs/heads/}"
+              branch="${branch#origin/}"
+              branch="${branch#upstream/}"
+              branch_lc="${branch,,}"
+              pr_owner_lc="${pr_owner,,}"
+
+              case "$branch_lc" in
+                master|canary|"${prefix_lc}canary") continue ;;
+              esac
+
+              keep=0
+              if [[ "$branch_lc" == "${prefix_lc}"* ]]; then keep=1; fi
+              if [[ -n "$pr_owner_lc" && "$pr_owner_lc" == "$user_lc" ]]; then keep=1; fi
+              [[ "$keep" -eq 1 ]] || continue
+              [[ -z "${seen[$branch_lc]:-}" ]] || continue
+              seen[$branch_lc]=1
+              branch_line "$branch"
+              listed=1
+
+              second=$(git rev-parse "${merge_sha}^2" 2>/dev/null || true)
+              [[ -n "$second" ]] || continue
+              while IFS= read -r refshort; do
+                stacked="${refshort#origin/}"
+                stacked_lc="${stacked,,}"
+                case "$stacked_lc" in
+                  "${prefix_lc}canary"|canary) continue ;;
+                esac
+                [[ "$stacked_lc" == "$branch_lc" ]] && continue
+                [[ -z "${seen[$stacked_lc]:-}" ]] || continue
+                git merge-base --is-ancestor "$refshort" "$second" || continue
+                git merge-base --is-ancestor "$refshort" refs/remotes/upstream/master && continue
+                branch_line "$stacked"
+                seen[$stacked_lc]=1
+              done < <(git for-each-ref --format='%(refname:short)' --sort=refname refs/remotes/origin/developerblue/)
+            done < <(git log --merges --pretty=%H%x09%s refs/remotes/upstream/master..HEAD)
+            if [[ "$listed" -eq 0 ]]; then
+              echo "_No ${CANARY_BRANCH_PREFIX} merges since upstream master._"
+            fi
+          } > /tmp/merges.md
+
+          {
+            echo "Canary ${CANARY} of BlueBubbles Server ${BASE} (\`${DISPLAY}\`)."
+            echo "Built at \`${SOURCE_REF}\`."
+            echo ""
+            notes=".github/canary-release-notes.md"
+            if [[ -f "$notes" ]]; then
+              extra=$(sed '/./,$!d' "$notes" | sed '/^[[:space:]]*$/d' || true)
+              if [[ -n "${extra}" ]]; then
+                cat "$notes"
+                echo ""
+              fi
+            fi
+            cat /tmp/merges.md
+            echo ""
+            echo "| Platform | File |"
+            echo "| --- | --- |"
+            echo "| macOS Intel | \`${ASSET_PREFIX}.dmg\` |"
+            echo "| macOS Apple Silicon | \`${ASSET_PREFIX}-arm64.dmg\` |"
+            echo ""
+            echo "- **macOS:** quit the production BlueBubbles Server first (shared settings). Open the DMG, drag the app, then **right-click → Open** (unsigned build)."
+          } > release-body.md
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.version.outputs.asset_prefix }}-macos
+          path: artifacts
+
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Canary ${{ needs.version.outputs.canary }} (${{ needs.version.outputs.display }})
+          target_commitish: ${{ needs.version.outputs.source_ref }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body_path: release-body.md
+          files: |
+            artifacts/*.dmg

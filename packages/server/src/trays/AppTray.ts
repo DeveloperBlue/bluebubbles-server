@@ -1,9 +1,10 @@
 import { autoUpdater } from "electron-updater";
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
+import { getTrayVersionLabel } from "@server/helpers/canary";
 import { Tray } from ".";
 import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
-import { Menu, nativeTheme, Tray as ElectronTray, app } from "electron";
+import { Menu, nativeTheme, Tray as ElectronTray } from "electron";
 import { AppWindow } from "@windows/AppWindow";
 import path from "path";
 
@@ -88,7 +89,7 @@ export class AppTray extends Tray {
 
         return Menu.buildFromTemplate([
             {
-                label: `BlueBubbles Server v${app.getVersion()}`,
+                label: getTrayVersionLabel(),
                 enabled: false
             },
             {

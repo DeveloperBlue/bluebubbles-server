@@ -2,6 +2,7 @@ import path from "path";
 import { BrowserWindow, HandlerDetails, shell } from "electron";
 import { Window } from ".";
 import { Server } from "@server";
+import { getWindowTitle } from "@server/helpers/canary";
 import { FirebaseOAuthWindow } from "@windows/FirebaseOAuthWindow";
 import { ContactsOAuthWindow } from "./ContactsOAuthWindow";
 
@@ -35,7 +36,7 @@ export class AppWindow extends Window {
         }
 
         this.instance = new BrowserWindow({
-            title: "BlueBubbles Server",
+            title: getWindowTitle(),
             useContentSize: true,
             width: 1080,
             minWidth: 850,

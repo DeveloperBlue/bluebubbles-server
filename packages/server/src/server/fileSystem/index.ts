@@ -16,6 +16,7 @@ import {
 } from "@server/helpers/utils";
 import { isMinMonterey } from "@server/env";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
+import { patchUserDataPath } from "@server/helpers/canary";
 
 import { startMessages } from "../api/apple/scripts";
 import {
@@ -33,8 +34,8 @@ import { uuidv4 } from "@firebase/util";
 const FindProcess = require("find-process");
 const { rimrafSync } = require("rimraf");
 
-// Patch in original user data directory
-app.setPath("userData", app.getPath("userData").replace("@bluebubbles/server", "bluebubbles-server"));
+// Patch in original user data directory (canary shares prod's folder)
+patchUserDataPath();
 
 // Directory modifiers based on the environment
 let subdir = "";
