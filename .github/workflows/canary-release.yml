@@ -116,7 +116,7 @@ jobs:
 
   build:
     needs: version
-    runs-on: macos-13
+    runs-on: macos-15-intel
     timeout-minutes: 90
     steps:
       - name: Checkout code
@@ -164,15 +164,12 @@ jobs:
         env:
           ASSET_PREFIX: ${{ needs.version.outputs.asset_prefix }}
         run: |
+          # macOS runners ship Bash 3.2 — no mapfile
           set -euo pipefail
           mkdir -p out
-          mapfile -t found < <(find packages/server/releases -type f -name '*.dmg' | sort)
-          if [[ ${#found[@]} -eq 0 ]]; then
-            echo "::error::No DMGs under packages/server/releases"
-            find packages/server/releases -type f || true
-            exit 1
-          fi
-          for f in "${found[@]}"; do
+          count=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
             base=$(basename "$f")
             # bluebubbles-1.9.9-canary.1-x64.dmg → bluebubbles-1.9.9-canary.1.dmg
             out="$base"
@@ -181,7 +178,13 @@ jobs:
             fi
             cp "$f" "out/$out"
             echo "collected $out"
-          done
+            count=$((count + 1))
+          done < <(find packages/server/releases -type f -name '*.dmg' | sort)
+          if [[ "$count" -eq 0 ]]; then
+            echo "::error::No DMGs under packages/server/releases"
+            find packages/server/releases -type f || true
+            exit 1
+          fi
           ls -la out/
 
       - name: Upload artifacts
