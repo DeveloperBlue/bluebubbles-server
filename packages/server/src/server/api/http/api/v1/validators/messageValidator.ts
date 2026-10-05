@@ -136,8 +136,15 @@ export class MessageValidator {
             ctx.request?.body,
             MessageValidator.sendAttachmentRules
         );
+        const auxVideo = files?.auxVideo as File | undefined;
         let saniMethod = method ?? "apple-script";
-        if (effectId || subject || selectedMessageGuid || ctx.request.body.attributedBody) {
+        if (
+            effectId ||
+            subject ||
+            selectedMessageGuid ||
+            ctx.request.body.attributedBody ||
+            (auxVideo?.path && auxVideo.size > 0)
+        ) {
             saniMethod = "private-api";
         }
 

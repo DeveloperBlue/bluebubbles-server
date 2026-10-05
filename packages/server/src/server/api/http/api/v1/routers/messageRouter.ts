@@ -328,6 +328,7 @@ export class MessageRouter {
         const { tempGuid, chatGuid, name, method, subject, selectedMessageGuid, partIndex, effectId, isAudioMessage } =
             ctx.request?.body ?? {};
         const attachment = files?.attachment as File;
+        const auxVideo = files?.auxVideo as File | undefined;
 
         // Add to send cache
         Server().httpService.sendCache.add(tempGuid);
@@ -344,7 +345,8 @@ export class MessageRouter {
                 subject,
                 effectId,
                 selectedMessageGuid,
-                partIndex
+                partIndex,
+                auxVideoPath: auxVideo?.path ?? null
             });
 
             // Remove from cache
