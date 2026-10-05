@@ -63,6 +63,7 @@ export type SendAttachmentParams = {
     effectId?: string;
     selectedMessageGuid?: string;
     partIndex?: number;
+    auxVideoPath?: string | null;
 };
 
 export type SendReactionParams = {

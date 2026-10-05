@@ -178,9 +178,16 @@ export class AttachmentRouter {
     static async uploadAttachment(ctx: RouterContext, _: Next) {
         const { files } = ctx.request;
         const attachment = files?.attachment as unknown as File;
+        const auxVideoUpload = files?.auxVideo as unknown as File | undefined;
 
         // Create a filename using the hash & extension of the attachment
         const location = await AttachmentInterface.upload(attachment.path, attachment.name);
+
+        // Optional Live Photo companion: stage as same-stem .mov beside the still so
+        // multipart send can find it via sibling detection (native: one still part + Aux).
+        if (auxVideoUpload?.path && fs.existsSync(auxVideoUpload.path)) {
+            FileSystem.copyLivePhotoCompanion(location, auxVideoUpload.path);
+        }
 
         // The path will essentially be "<attachment dir>/<uuid>/<hash>.ext".
         // We want to get the <uuid> and <hash> parts.

@@ -137,14 +137,23 @@ export class MessageInterface {
         effectId = null,
         selectedMessageGuid = null,
         partIndex = 0,
-        isAudioMessage = false
+        isAudioMessage = false,
+        auxVideoPath = null
     }: SendAttachmentParams): Promise<Message> {
         if (!chatGuid) throw new Error("No chat GUID provided");
 
         // Copy the attachment to a more permanent storage
         const newPath = FileSystem.copyAttachment(attachmentPath, attachmentName, method);
-
-        Server().log(`Sending attachment "${attachmentName}" to ${chatGuid}`, "debug");
+        if (auxVideoPath && fs.existsSync(auxVideoPath)) {
+            if (method === "private-api") {
+                FileSystem.copyLivePhotoCompanion(newPath, auxVideoPath);
+            } else {
+                Server().log(
+                    "Ignoring auxVideo for apple-script attachment send (Live Photos require private-api)",
+                    "warn"
+                );
+            }
+        }
 
         // Make sure messages is open
         if (method === "apple-script") {
@@ -547,6 +556,27 @@ export class MessageInterface {
                 const currentPath = path.join(baseDir, parts[i].attachment);
                 const newPath = FileSystem.copyAttachment(currentPath, parts[i].name, "private-api");
                 parts[i].filePath = newPath;
+
+                // Stage Live Photo companion next to the still when provided or when a sibling .mov exists
+                const auxVideoField = parts[i].auxVideo ?? parts[i].auxVideoPath ?? null;
+                const uploadParsed = path.parse(currentPath);
+                const siblingMov = path.join(uploadParsed.dir, `${uploadParsed.name}.mov`);
+                // Relative paths are upload keys like "uuid/name.mov" (same as attachment field).
+                const auxVideoResolved =
+                    typeof auxVideoField === "string"
+                        ? path.isAbsolute(auxVideoField)
+                            ? auxVideoField
+                            : path.join(baseDir, auxVideoField)
+                        : null;
+                const companionSource =
+                    auxVideoResolved && fs.existsSync(auxVideoResolved)
+                        ? auxVideoResolved
+                        : fs.existsSync(siblingMov)
+                          ? siblingMov
+                          : null;
+                if (companionSource) {
+                    FileSystem.copyLivePhotoCompanion(newPath, companionSource);
+                }
             }
         }
 
