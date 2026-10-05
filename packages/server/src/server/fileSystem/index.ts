@@ -223,6 +223,63 @@ export class FileSystem {
         return newPath;
     }
 
+    /**
+     * Copy a Live Photo movie next to a staged still so the stems match
+     * (`IMG_1234.HEIC` + `IMG_1234.MOV`) for Private API / helper Aux linking.
+     *
+     * Also stamps Apple Live Photo pairing metadata (content identifier +
+     * still-image-time) so Messages can assemble a `.pvt` / open the pair.
+     * Android Motion Photo remuxes lack these tracks; without them Mac/iPad
+     * show a LIVE badge but fail to open.
+     */
+    static copyLivePhotoCompanion(stillPath: string, companionPath: string): string {
+        const parsed = path.parse(stillPath);
+        const dest = path.join(parsed.dir, `${parsed.name}.mov`);
+        if (dest !== companionPath) {
+            fs.copyFileSync(companionPath, dest);
+        }
+        FileSystem.stampLivePhotoPair(stillPath, dest);
+        return dest;
+    }
+
+    /**
+     * Stamp MakerApple/content.identifier + still-image-time via the Swift helper.
+     * Best-effort: logs and continues if the helper is missing or fails.
+     */
+    static stampLivePhotoPair(stillPath: string, movPath: string): void {
+        const candidates = [
+            path.join(appPath, "scripts", "stamp-live-photo.swift"),
+            path.join(appPath, "packages", "server", "scripts", "stamp-live-photo.swift")
+        ];
+        const script = candidates.find(p => fs.existsSync(p));
+        if (!script) {
+            Server().log("Live Photo stamp script not found; skipping metadata stamp", "warn");
+            return;
+        }
+        const t0 = Date.now();
+        try {
+            // Cap well under typical client receiveTimeout (~30s) so a hung/cold
+            // `swift` compile cannot leave the HTTP request without a response.
+            const result = child_process.spawnSync("/usr/bin/swift", [script, stillPath, movPath], {
+                encoding: "utf8",
+                timeout: 20000
+            });
+            const ms = Date.now() - t0;
+            if (result.error || result.status !== 0) {
+                Server().log(
+                    `Live Photo stamp failed (ms=${ms}, rc=${result.status}, signal=${result.signal}): ${
+                        result.error ?? (result.stderr || result.stdout || "").trim()
+                    }`,
+                    "warn"
+                );
+                return;
+            }
+            Server().log(`Live Photo metadata stamped in ${ms}ms: ${(result.stdout || "").trim()}`, "debug");
+        } catch (ex: any) {
+            Server().log(`Live Photo stamp threw: ${ex?.message ?? ex}`, "warn");
+        }
+    }
+
     static async cachedAttachmentCount() {
         let count = 0;
         const files = [FileSystem.attachmentsDir, FileSystem.attachmentCacheDir, FileSystem.messagesAttachmentsDir];
