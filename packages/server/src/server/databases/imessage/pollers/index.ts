@@ -24,6 +24,7 @@ type MessageState = {
     dateRetracted: number;
     didNotifyRecipient: boolean;
     hasUnsentParts: boolean;
+    attachmentCount: number;
 };
 
 type ChatState = {
@@ -131,6 +132,9 @@ export abstract class IMessagePoller extends Loggable {
         // If it has unsent parts, it's an update
         if (message.hasUnsentParts !== state.hasUnsentParts) return "updated-entry";
 
+        // Attachment joins can land after the message row; re-emit when they appear
+        if ((message.attachments?.length ?? 0) !== state.attachmentCount) return "updated-entry";
+
         return null;
     }
 
@@ -150,7 +154,8 @@ export abstract class IMessagePoller extends Loggable {
             dateEdited: message.dateEdited ? message.dateEdited.getTime() : 0,
             dateRetracted: message.dateRetracted ? message.dateRetracted.getTime() : 0,
             didNotifyRecipient: message.didNotifyRecipient ?? false,
-            hasUnsentParts: message.hasUnsentParts
+            hasUnsentParts: message.hasUnsentParts,
+            attachmentCount: message.attachments?.length ?? 0
         };
 
         return event;
