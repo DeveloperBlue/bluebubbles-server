@@ -597,10 +597,13 @@ export class MessageInterface {
         }
 
         const maxWaitMs = 60000;
+        // Load attachments: clients remap temp → real attachment GUIDs from this
+        // response. Without them, multipart text+media rebuilds parts from
+        // attributedBody alone and drops the attachment when GUIDs don't match.
         const retMessage = await resultAwaiter({
             maxWaitMs,
             getData: async _ => {
-                return await Server().iMessageRepo.getMessage(result.identifier, true, false);
+                return await Server().iMessageRepo.getMessage(result.identifier, true, true);
             }
         });
 
