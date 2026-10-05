@@ -36,31 +36,61 @@ export class AttachmentInterface {
         return FileSystem.copyAttachment(path, name, "private-api");
     }
 
-    static getLivePhotoPath(attachment: Attachment): string | null {
-        // If we don't have a path, return null
-        const fPath = attachment?.filePath;
+    /**
+     * Resolve the companion movie for a Live Photo still.
+     *
+     * Prefer the Aux_<stillGuid> attachment (how Messages links iris) over a
+     * same-stem .mov next to chat.db's still path — outgoing sends often have
+     * the movie only on the Aux transfer until/unless the library settles.
+     */
+    static async getLivePhotoPath(attachment: Attachment): Promise<string | null> {
+        if (!attachment) return null;
+
+        // 1) Aux transfer GUID: Aux_<stillGuid> (and bare-UUID form if prefixed)
+        const stillGuids = [attachment.guid, attachment.originalGuid].filter(
+            (g): g is string => !!g && !g.startsWith("Aux_")
+        );
+        const auxGuids = new Set<string>();
+        for (const guid of stillGuids) {
+            auxGuids.add(`Aux_${guid}`);
+            if (guid.length > 36) {
+                auxGuids.add(`Aux_${guid.substring(guid.length - 36)}`);
+            }
+        }
+
+        const repo = Server().iMessageRepo?.db?.getRepository(Attachment);
+        if (repo && auxGuids.size > 0) {
+            for (const auxGuid of auxGuids) {
+                try {
+                    const aux = await repo.findOne({ where: { guid: auxGuid } });
+                    if (!aux?.filePath) continue;
+                    const auxPath = FileSystem.getRealPath(aux.filePath);
+                    if (auxPath && fs.existsSync(auxPath)) return auxPath;
+                } catch {
+                    // Fall through to sibling sniff
+                }
+            }
+        }
+
+        // 2) Fallback: settled library layout (same-stem .mov beside the still)
+        const fPath = attachment.filePath;
         if (isEmpty(fPath)) return null;
 
-        // Get the existing extension (if any).
-        // If it's been converted, it'll have a double-extension.
-        let ext = fPath.includes('.heic.jpeg') ? 'heic.jpeg' : fPath.split(".").pop() ?? "";
-
-        // If the extension is not an image extension, return null
+        let ext = fPath.includes(".heic.jpeg") ? "heic.jpeg" : fPath.split(".").pop() ?? "";
         if (!AttachmentInterface.livePhotoExts.includes(ext.toLowerCase())) return null;
 
-        // Escape periods in the extension for the regex
-        ext = ext.replace(/\./g, "\\.");
-    
-        // Get the path to the live photo
-        // Replace the extension with .mov, or add it if there is no extension
-        const livePath = isNotEmpty(ext) ? fPath.replace(new RegExp(`\\.${ext}$`), ".mov") : `${fPath}.mov`;
+        const escaped = ext.replace(/\./g, "\\.");
+        const livePath = isNotEmpty(ext)
+            ? fPath.replace(new RegExp(`\\.${escaped}$`), ".mov")
+            : `${fPath}.mov`;
         const realPath = FileSystem.getRealPath(livePath);
+        if (fs.existsSync(realPath)) return realPath;
 
-        // If the live photo doesn't exist, return null
-        if (!fs.existsSync(realPath)) return null;
-
-        // If the .mov file exists, return the path
-        return realPath;
+        // Messages sometimes stores .MOV
+        const upper = FileSystem.getRealPath(
+            isNotEmpty(ext) ? fPath.replace(new RegExp(`\\.${escaped}$`), ".MOV") : `${fPath}.MOV`
+        );
+        return fs.existsSync(upper) ? upper : null;
     }
 
     static async forceDownload(attachment: Attachment): Promise<Attachment> {
