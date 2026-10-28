@@ -8,8 +8,7 @@ import { Success } from "../responses/success";
 import { AlertsInterface } from "@server/api/interfaces/alertsInterface";
 import { isEmpty, isTruthyBool } from "@server/helpers/utils";
 import { BadRequest } from "../responses/errors";
-import { autoUpdater } from "electron-updater";
-import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
+import { parseWithQuery } from "../utils";
 
 export class ServerRouter {
     static async getInfo(ctx: RouterContext, _: Next) {
@@ -30,10 +29,17 @@ export class ServerRouter {
             throw new BadRequest({ message: "No update available!", error: "NO_UPDATE_AVAILABLE" });
         }
 
-        // Once the update is downloaded, it should be installed automatically.
+        // Releases without update metadata would only open a browser on the server's Mac
+        if (!Server().updater.updateInfo?.canAutoInstall) {
+            throw new BadRequest({
+                message: `Update v${updateMetadata.metadata.version} must be installed manually!`,
+                error: "UPDATE_REQUIRES_MANUAL_INSTALL"
+            });
+        }
+
+        // Once the update is downloaded, it's installed and the app relaunches.
         // Ref: updateService/index.ts
-        Server().emitMessage(SERVER_UPDATE_DOWNLOADING, null);
-        const waiter = autoUpdater.downloadUpdate();
+        const waiter = Server().updater.installUpdate();
         if (wait) {
             Server().log("Waiting for update to download...", "debug");
             await waiter;
@@ -60,13 +66,9 @@ export class ServerRouter {
     }
 
     static async getLogs(ctx: RouterContext, _: Next) {
-        const countParam = ctx.request.query?.count ?? "100";
-        let count;
-
-        try {
-            count = Number.parseInt(countParam as string, 10);
-        } catch (ex: any) {
-            count = 100;
+        const count = FileSystem.parseLogCount(ctx.request.query?.count);
+        if (count === null) {
+            throw new BadRequest({ error: "Count must be a positive integer" });
         }
 
         const logs = await FileSystem.getLogs({ count });
@@ -78,7 +80,8 @@ export class ServerRouter {
 
         const params: any = {};
         if (only) {
-            params.only = (only as string).split(",");
+            // Repeated params (?only=a&only=b) arrive as an array
+            params.only = parseWithQuery(only, false);
         }
 
         return new Success(ctx, { data: await ServerInterface.getDatabaseTotals(params) }).send();
@@ -89,7 +92,8 @@ export class ServerRouter {
 
         const params: any = {};
         if (only) {
-            params.only = (only as string).split(",");
+            // Repeated params (?only=a&only=b) arrive as an array
+            params.only = parseWithQuery(only, false);
         }
 
         return new Success(ctx, { data: await ServerInterface.getMediaTotals(params) }).send();
@@ -100,7 +104,8 @@ export class ServerRouter {
 
         const params: any = {};
         if (only) {
-            params.only = (only as string).split(",");
+            // Repeated params (?only=a&only=b) arrive as an array
+            params.only = parseWithQuery(only, false);
         }
 
         return new Success(ctx, { data: await await ServerInterface.getMediaTotalsByChat(params) }).send();

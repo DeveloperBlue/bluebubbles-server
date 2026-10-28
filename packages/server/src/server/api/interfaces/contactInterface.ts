@@ -2,8 +2,8 @@ import { Server } from "@server";
 import fs from "fs";
 import vcf from "vcf";
 import { Contact, ContactAddress } from "@server/databases/server/entity";
-import * as base64 from "byte-base64";
 import { deduplicateObjectArray, isEmpty, isNotEmpty } from "@server/helpers/utils";
+import { AddressIndex, buildAddressIndex, findByAddress, findInAddressIndex } from "@server/helpers/addressMatching";
 import type { FindOptionsWhere } from "typeorm";
 import { ContactsLib } from "../lib/ContactsLib";
 
@@ -12,7 +12,31 @@ type GenericContactParams = {
     contact?: Contact;
 };
 
+// A raw contact record, and whether it came from the Contacts store ("api") or the server DB ("db")
+type ContactRecord = { record: any; source: "api" | "db" };
+
+/**
+ * The first image that has any bytes. node-mac-contacts returns an empty
+ * Buffer (not null) for a contact without a photo.
+ */
+const firstImage = (...images: unknown[]): Uint8Array | null => {
+    for (const image of images) {
+        if (image instanceof Uint8Array && image.byteLength > 0) return image;
+    }
+
+    return null;
+};
+
+// Encodes without copying the image first
+const imageToBase64 = (image: Uint8Array): string =>
+    Buffer.from(image.buffer, image.byteOffset, image.byteLength).toString("base64");
+
 export class ContactInterface {
+    // Address index of each Contacts store list that has been searched. node-mac-contacts returns the
+    // same cached array until the store changes, so the index is built once per change rather than on
+    // every lookup. Keyed weakly, so a stale index is collected along with its list.
+    private static apiAddressIndexes = new WeakMap<any[], AddressIndex<ContactRecord>>();
+
     private static extractEmails = (contact: any) => {
         // Normalize all the email records
         const emails = [...(contact?.emails ?? []), ...(contact?.emailAddresses ?? []), ...(contact?.addresses ?? [])]
@@ -62,13 +86,18 @@ export class ContactInterface {
     ): any {
         return records.map((contact: NodeJS.Dict<any>) => {
             // Load the avatar based on the selected extra fields
-            let avatar = null;
+            // node-mac-contacts names the thumbnail `contactThumbnailImage`; `contactImageThumbnail`
+            // is accepted too, since that's what this code has always (wrongly) checked for
+            let avatar: Uint8Array | null = null;
             if (extraProps.includes("avatar")) {
-                avatar = contact?.avatar ?? contact?.contactImage ?? contact.contactImageThumbnail;
+                avatar = firstImage(contact?.avatar, contact?.contactImage, contact?.contactThumbnailImage);
             } else if (extraProps.includes("contactImage")) {
-                avatar = contact?.contactImage ?? contact.contactImageThumbnail;
-            } else if (extraProps.includes("contactImageThumbnail")) {
-                avatar = contact?.contactImageThumbnail;
+                avatar = firstImage(contact?.contactImage, contact?.contactThumbnailImage);
+            } else if (
+                extraProps.includes("contactThumbnailImage") ||
+                extraProps.includes("contactImageThumbnail")
+            ) {
+                avatar = firstImage(contact?.contactThumbnailImage);
             }
 
             let displayName = contact?.displayName;
@@ -87,7 +116,7 @@ export class ContactInterface {
                 displayName,
                 nickname: contact?.nickname,
                 birthday: contact?.birthday,
-                avatar: isNotEmpty(avatar) ? base64.bytesToBase64(avatar) : "",
+                avatar: avatar ? imageToBase64(avatar) : "",
                 sourceType,
                 id: contact?.identifier ?? contact?.id
             };
@@ -102,46 +131,59 @@ export class ContactInterface {
      * @returns A contact entry dictionary
      */
     static findContact(address: string, { preloadedContacts }: { preloadedContacts?: any[] | null } = {}): any | null {
-        const contactList = preloadedContacts ?? ContactsLib.getAllContacts();
-        const alphaNumericRegex = /[^a-zA-Z0-9_]/gi;
-        const addr = address.replace(alphaNumericRegex, "");
-
-        // Build a map where the address is the key and contact dict is the value
-        const cacheMap: NodeJS.Dict<any> = {};
-        for (const c of contactList) {
-            const addresses = [
-                ...(c?.phoneNumbers ?? []).map((e: NodeJS.Dict<any>) => e.address),
-                ...(c?.emailAddresses ?? []).map((e: NodeJS.Dict<any>) => e.address)
-            ].map(e => e.replace(alphaNumericRegex, ""));
-            for (const contactAddr of addresses) {
-                cacheMap[contactAddr] = c;
-            }
+        if (!preloadedContacts) {
+            return findInAddressIndex(address, ContactInterface.getApiAddressIndex())?.record ?? null;
         }
 
-        // Find a key that matches the last 'x' characters.
-        // First, test the entire string, then slowly remove numbers from the start
-        // until we find a match. If we don't find a match after testing 4 varients, we are done.
-        const choices: number[] = [addr.length, addr.length - 1, addr.length - 2, addr.length - 3];
-        let output: NodeJS.Dict<any> = null;
-        for (const sub of choices) {
-            const ending = addr.substring(addr.length - sub, addr.length);
-            const matches = Object.keys(cacheMap).filter(e => e && e.endsWith(ending));
-            if (matches && matches.length > 0) {
-                output = cacheMap[matches[0]];
-                break;
-            }
-        }
+        const contactList = preloadedContacts;
 
-        return output;
+        // Contacts come either straight from the Contacts API (addresses are strings, emails
+        // are under `emailAddresses`) or from mapContacts (addresses are { address }, emails
+        // are under `emails`), so accept both shapes.
+        const getAddresses = (contact: NodeJS.Dict<any>): string[] =>
+            [...(contact?.phoneNumbers ?? []), ...(contact?.emails ?? []), ...(contact?.emailAddresses ?? [])]
+                .map(e => (typeof e === "string" ? e : e?.address))
+                .filter(e => typeof e === "string");
+
+        return findByAddress(address, contactList ?? [], getAddresses);
     }
 
     /**
-     * Gets all contacts from the AddressBook API
-     *
-     * @param extraProps Non-default properties to fetch from the API
-     * @returns A list of contact entries from the API
+     * The addresses a raw contact record (from the Contacts store or the server DB) maps to.
+     * These are exactly the `phoneNumbers` and `emails` that mapContacts gives it.
      */
-    static getApiContacts(extraProps: string[] = []): any[] {
+    private static getRecordAddresses(record: any): string[] {
+        return [...ContactInterface.extractPhoneNumbers(record), ...ContactInterface.extractEmails(record)].map(
+            e => e.address
+        );
+    }
+
+    /**
+     * Returns the address index for the Contacts store's current contact list
+     */
+    private static getApiAddressIndex(): AddressIndex<ContactRecord> {
+        const records = ContactsLib.getAllContacts();
+        let index = ContactInterface.apiAddressIndexes.get(records);
+        if (!index) {
+            index = buildAddressIndex(
+                records.map((record): ContactRecord => ({ record, source: "api" })),
+                e => ContactInterface.getRecordAddresses(e.record)
+            );
+            ContactInterface.apiAddressIndexes.set(records, index);
+        }
+
+        return index;
+    }
+
+    /**
+     * Resolves the properties a client asked for into the Contacts store fields that serve them
+     *
+     * @param requested The properties the client asked for
+     * @returns A new list; the input is never modified
+     */
+    private static resolveApiExtraProps(requested: string[] = []): string[] {
+        let extraProps = [...requested];
+
         // Compensate for if `avatar` is passed instead of contactImage
         if (extraProps.includes("avatar")) {
             if (!extraProps.includes("contactImage") && !extraProps.includes("contactThumbnailImage")) {
@@ -157,7 +199,19 @@ export class ContactInterface {
             extraProps.push("contactThumbnailImage");
         }
 
-        return ContactInterface.mapContacts(ContactsLib.getAllContacts(extraProps), "api", { extraProps });
+        return extraProps;
+    }
+
+    /**
+     * Gets all contacts from the AddressBook API
+     *
+     * @param extraProps Non-default properties to fetch from the API
+     * @returns A list of contact entries from the API
+     */
+    static getApiContacts(extraProps: string[] = []): any[] {
+        return ContactInterface.mapContacts(ContactsLib.getAllContacts(), "api", {
+            extraProps: ContactInterface.resolveApiExtraProps(extraProps)
+        });
     }
 
     /**
@@ -169,6 +223,15 @@ export class ContactInterface {
         return ContactInterface.mapContacts(await Server().repo.getContacts(withAvatars), "db", { extraProps });
     }
 
+    private static wantsAvatars(extraProperties: string[] = []): boolean {
+        const saniProps = extraProperties.map(e => e.toLowerCase());
+        return (
+            saniProps.includes("contactimage") ||
+            saniProps.includes("contactthumbnailimage") ||
+            saniProps.includes("avatar")
+        );
+    }
+
     /**
      * Gets all known contacts from the API and local DBs
      *
@@ -176,11 +239,7 @@ export class ContactInterface {
      * @returns A list of contact entries from both the API and local DB
      */
     static async getAllContacts(extraProperties: string[] = []): Promise<any[]> {
-        const saniProps = extraProperties.map(e => e.toLowerCase());
-        const withAvatars =
-            saniProps.includes("contactimage") ||
-            saniProps.includes("contactthumbnailimage") ||
-            saniProps.includes("avatar");
+        const withAvatars = ContactInterface.wantsAvatars(extraProperties);
         const apiContacts = ContactInterface.getApiContacts(extraProperties);
         const dbContacts = await ContactInterface.getDbContacts(withAvatars);
         return [...dbContacts, ...apiContacts];
@@ -445,14 +504,31 @@ export class ContactInterface {
      * @returns A list of contacts matching the addresses
      */
     static async queryContacts(addresses: string[], extraProperties: string[] = []): Promise<any[]> {
-        const data: any[] = [];
+        const withAvatars = ContactInterface.wantsAvatars(extraProperties);
+        const dbRecords = await Server().repo.getContacts(withAvatars);
 
-        const contactList = await ContactInterface.getAllContacts(extraProperties);
+        // Same candidates, in the same order, as getAllContacts() (DB first), but matched on their raw
+        // records so that only the matches are mapped, rather than base64-encoding every contact's photo
+        const index: AddressIndex<ContactRecord> = [
+            ...buildAddressIndex(
+                dbRecords.map((record): ContactRecord => ({ record, source: "db" })),
+                e => ContactInterface.getRecordAddresses(e.record)
+            ),
+            ...ContactInterface.getApiAddressIndex()
+        ];
+
+        const data: any[] = [];
         for (const i of addresses) {
-            const found = ContactInterface.findContact(i, { preloadedContacts: contactList });
-            if (found) {
-                data.push(found);
-            }
+            const found = findInAddressIndex(i, index);
+            if (!found) continue;
+
+            const extraProps =
+                found.source === "db"
+                    ? withAvatars
+                        ? ["avatar"]
+                        : []
+                    : ContactInterface.resolveApiExtraProps(extraProperties);
+            data.push(ContactInterface.mapContacts([found.record], found.source, { extraProps })[0]);
         }
 
         return data;
